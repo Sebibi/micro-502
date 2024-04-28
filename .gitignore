@@ -139,3 +139,5 @@ dmypy.json
 # Occupancy map
 map.png
 
+.idea/
+

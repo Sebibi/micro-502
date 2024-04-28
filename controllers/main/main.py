@@ -10,7 +10,7 @@ import my_control
 import time, random
 import cv2
 
-exp_num = 3                     # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Practical
+exp_num = 1                     # 0: Coordinate Transformation, 1: PID Tuning, 2: Kalman Filter, 3: Practical
 control_style = 'autonomous'      # 'keyboard' or 'autonomous'
 rand_env = True                # Randomise the environment for the practical exercise
 

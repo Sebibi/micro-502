@@ -3,6 +3,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 import cv2
+from scipy.signal import convolve2d
 
 # Global variables
 on_ground = True
@@ -11,22 +12,74 @@ timer = None
 startpos = None
 timer_done = None
 
-# The available ground truth state measurements can be accessed by calling sensor_data[item]. All values of "item" are provided as defined in main.py lines 296-323. 
-# The "item" values that you can later use in the hardware project are:
+# All available ground truth measurements can be accessed by calling sensor_data[item], where "item" can take the following values:
 # "x_global": Global X position
 # "y_global": Global Y position
-# "range_down": Downward range finder distance (Used instead of Global Z distance)
-# "range_front": Front range finder distance
-# "range_left": Leftward range finder distance 
-# "range_right": Rightward range finder distance
-# "range_back": Backward range finder distance
+# "z_global": Global Z position
 # "roll": Roll angle (rad)
 # "pitch": Pitch angle (rad)
 # "yaw": Yaw angle (rad)
+# "v_x": Global X velocity
+# "v_y": Global Y velocity
+# "v_z": Global Z velocity
+# "v_forward": Forward velocity (body frame)
+# "v_left": Leftward velocity (body frame)
+# "v_down": Downward velocity (body frame)
+# "ax_global": Global X acceleration
+# "ay_global": Global Y acceleration
+# "az_global": Global Z acceleration
+# "range_front": Front range finder distance
+# "range_down": Donward range finder distance
+# "range_left": Leftward range finder distance 
+# "range_back": Backward range finder distance
+# "range_right": Rightward range finder distance
+# "range_down": Downward range finder distance
+# "rate_roll": Roll rate (rad/s)
+# "rate_pitch": Pitch rate (rad/s)
+# "rate_yaw": Yaw rate (rad/s)
 
 # This is the main function where you will implement your control algorithm
+
+def get_potential(map, goal):
+
+    map = map * (-1)
+
+    # Convolve map
+    kernel = np.array([[1, 1, 1], [1, 4, 1], [1, 1, 1]], dtype=np.float32)
+    kernel /= np.sum(kernel)
+    map = convolve2d(map, kernel, mode='same', boundary='fill', fillvalue=0)
+    # map = convolve2d(map, kernel, mode='same', boundary='fill', fillvalue=0)
+
+    potential = np.zeros_like(map)
+    for i in range(map.shape[0]):
+        for j in range(map.shape[1]):
+            distance = np.sqrt((i - goal[0]) ** 2 + (j - goal[1]) ** 2)
+            potential[i, j] = distance + map[i, j] * 1
+    return potential
+
+
+def get_action(pos, potential):
+    neighbors = []
+    for i in range(-1, 2):
+        for j in range(-1, 2):
+            x = np.clip(pos[0] + i, 0, potential.shape[0] - 1)
+            y = np.clip(pos[1] + j, 0, potential.shape[1] - 1)
+            neighbors.append((x, y))
+
+    # Return neighbor with lowest potential
+    neighbors_potential = [potential[point[0], point[1]] for point in neighbors]
+    min_index = np.argmin(neighbors_potential)
+    return neighbors[min_index]
+
+def find_path(pos, goal, potential):
+    pos_h = []
+    for i in range(10):
+        pos = get_action(pos, potential)
+        pos_h.append(pos)
+    return pos_h
+
 def get_command(sensor_data, camera_data, dt):
-    global on_ground, startpos
+    global on_ground, startpos, timer
 
     # Open a window to display the camera image
     # NOTE: Displaying the camera image will slow down the simulation, this is just for testing
@@ -35,7 +88,7 @@ def get_command(sensor_data, camera_data, dt):
     
     # Take off
     if startpos is None:
-        startpos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['range_down']]    
+        startpos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]    
     if on_ground and sensor_data['range_down'] < 0.49:
         control_command = [0.0, 0.0, height_desired, 0.0]
         return control_command
@@ -43,11 +96,60 @@ def get_command(sensor_data, camera_data, dt):
         on_ground = False
 
     # ---- YOUR CODE HERE ----
-    control_command = [0.0, 0.0, height_desired, 1.0]
     on_ground = False
-    # map = occupancy_map(sensor_data)
-    
-    return control_command # Ordered as array with: [v_forward_cmd, v_left_cmd, alt_cmd, yaw_rate_cmd]
+    map = occupancy_map(sensor_data)
+
+    # Get the goal position and drone position
+    goal = np.array([4.5, 1.5]) / res_pos
+    pos = [int(sensor_data['x_global'] / res_pos), int(sensor_data['y_global'] / res_pos)]
+
+    potential = get_potential(map, goal)
+    path = find_path(pos, goal, potential)
+
+    if t % 200 == 0:
+        plt.imshow(potential, cmap='gray', origin='lower')
+        for point in path:
+            plt.plot(point[1], point[0], 'ro')
+        plt.plot(pos[1], pos[0], 'bo')
+        plt.plot(goal[1], goal[0], 'go')
+        plt.show()
+
+    next_pos = path[4]
+    next_yaw = np.arctan2(next_pos[1] - pos[1], next_pos[0] - pos[0])
+    set_point = [next_pos[0] * res_pos, next_pos[1] * res_pos, next_yaw]
+
+    control_command = go_to_point(set_point, height_desired, sensor_data, dt)
+    return control_command # [vx, vy, alt, yaw_rate]
+
+
+
+
+def go_to_point(set_point, set_z, sensor_data, dt):
+    drone_pos = np.array([sensor_data['x_global'], sensor_data['y_global'], sensor_data['yaw']])
+
+    # Set point in the global frame
+    set_pos = np.array([set_point[0], set_point[1]])
+
+    # Rotate the set point to the drone frame
+    yaw = 0
+    R_yaw = np.array([[np.cos(yaw), -np.sin(yaw)], [np.sin(yaw), np.cos(yaw)]])
+    set_pos_body = np.dot(R_yaw, set_pos)
+    set_point_body = [set_pos_body[0], set_pos_body[1], set_point[2]]
+
+    pos_error = set_point_body - drone_pos
+    pos_error[2] = clip_angle(pos_error[2])
+
+    # P controller
+    kp = np.array([1.0, 1.0, 0.5])
+    control_command = kp * pos_error
+    control_command = np.clip(control_command, -2, 2)
+    control_command = [control_command[0], control_command[1], set_z, control_command[2]]
+
+    print("Set point: ", np.array(set_point).round(2))
+    print("Drone pos: ", drone_pos.round(2))
+    return control_command
+
+
 
 
 # Occupancy map based on distance sensor
@@ -101,7 +203,6 @@ def occupancy_map(sensor_data):
         plt.savefig("map.png")
         plt.close()
     t +=1
-
     return map
 
 
@@ -112,8 +213,8 @@ def path_to_setpoint(path,sensor_data,dt):
 
     # Take off
     if startpos is None:
-        startpos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['range_down']]    
-    if on_ground and sensor_data['range_down'] < 0.49:
+        startpos = [sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global']]    
+    if on_ground and sensor_data['z_global'] < 0.49:
         current_setpoint = [startpos[0], startpos[1], height_desired, 0.0]
         return current_setpoint
     else:
@@ -137,7 +238,7 @@ def path_to_setpoint(path,sensor_data,dt):
 
     # Get the goal position and drone position
     current_setpoint = path[index_current_setpoint]
-    x_drone, y_drone, z_drone, yaw_drone = sensor_data['x_global'], sensor_data['y_global'], sensor_data['range_down'], sensor_data['yaw']
+    x_drone, y_drone, z_drone, yaw_drone = sensor_data['x_global'], sensor_data['y_global'], sensor_data['z_global'], sensor_data['yaw']
     distance_drone_to_goal = np.linalg.norm([current_setpoint[0] - x_drone, current_setpoint[1] - y_drone, current_setpoint[2] - z_drone, clip_angle(current_setpoint[3]) - clip_angle(yaw_drone)])
 
     # When the drone reaches the goal setpoint, e.g., distance < 0.1m
