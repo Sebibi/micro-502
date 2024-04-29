@@ -3,7 +3,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 import time
 import cv2
+import scipy.interpolate
 from scipy.signal import convolve2d
+from scipy.interpolate import interp1d
 from my_navigation import Navigation
 
 # Global variables
@@ -14,6 +16,7 @@ timer = None
 startpos = None
 timer_done = None
 next_pos = None
+nav_range = 0.3
 
 
 # All available ground truth measurements can be accessed by calling sensor_data[item], where "item" can take the following values:
@@ -58,7 +61,7 @@ def get_command(sensor_data, camera_data, dt):
         Navigation.startpos = np.array(startpos[:2])
     if on_ground and sensor_data['range_down'] < 0.49:
         control_command = [0.0, 0.0, height_desired, 0.0]
-        next_pos = np.array([sensor_data['x_global'] / res_pos, sensor_data['y_global'] / res_pos])
+        next_pos = np.array([sensor_data['x_global'], sensor_data['y_global']])
         return control_command
     else:
         on_ground = False
@@ -70,51 +73,66 @@ def get_command(sensor_data, camera_data, dt):
     pos_real = [sensor_data['x_global'], sensor_data['y_global']]
     Navigation.current_pos = np.array(pos_real)
     landing_zone = 3.5 < pos_real[0] < 5.0 and 0.0 < pos_real[1] < 3.0
-    turned = clip_angle(sensor_data['yaw'] - np.pi) < 0.1
+    turned = abs(clip_angle(sensor_data['yaw'] - np.pi)) < 0.3
 
     # Get the goal position and drone position
     pos = (int(sensor_data['x_global'] / res_pos), int(sensor_data['y_global'] / res_pos))
-
+    ground_data = sensor_data['z_global'] - sensor_data['range_down']
     Navigation.update_fsm_state(landing_zone, turned)
-    path = Navigation.navigate(pos, map)
+    path = Navigation.navigate(pos, map, ground_data)
 
-    if t % 500 == 0 and False:
+    if t % 2000 == 0 and True:
         potential = Navigation.potential_field.copy()
         fig = plt.figure('Potential Field Navigation')
         plt.imshow(np.flip(potential, axis=1), cmap='gray', origin='lower')
         plt.plot(14 - path[:, 1], path[:, 0], 'ro-')
         plt.plot(14 - pos[1], pos[0], 'bo')
         plt.colorbar()
+
+        if Navigation.fsm_state == "search_pad":
+            fig = plt.figure('Ground Map')
+            plt.imshow(np.flip(Navigation.ground_map, axis=1), cmap='gray', origin='lower')
+            plt.colorbar()
         plt.show()
 
     path = path * res_pos
 
-    # Interpolate between the points
-    augmented_path = np.insert(path, 0, pos_real, axis=0)
-    augmented_path_diff = np.diff(augmented_path, axis=0)
-    augmented_path_diff = np.insert(augmented_path_diff, 0, [0, 0], axis=0)
-    path_distance = np.linalg.norm(augmented_path_diff, axis=1)
-    path_cumulative_distance = np.cumsum(path_distance)
+    if Navigation.fsm_state != "search_pad":
+        # Interpolate between the points
+        path_diff = np.diff(path, axis=0)
+        path_diff = np.insert(path_diff, 0, [0, 0], axis=0)
+        path_distance = np.linalg.norm(path_diff, axis=1)
+        path_cumulative_distance = np.cumsum(path_distance)
 
-    if path_cumulative_distance[-1] < 0.5:
-        next_pos = path[0]
-        print("Could not interpolate")
+        if path_cumulative_distance[-1] < nav_range or len(path) < 3:
+            new_pos = path[1] if len(path) > 1 else path[0]
+            print("Could not interpolate", path)
+        else:
+            next_x = interp1d(path_cumulative_distance, path[:, 0], kind='quadratic')
+            next_y = interp1d(path_cumulative_distance, path[:, 1], kind='quadratic')
+            new_pos = np.array([next_x(nav_range), next_y(nav_range)])
     else:
-        next_x = np.interp(0.5, path_cumulative_distance, augmented_path[:, 0])
-        next_y = np.interp(0.5, path_cumulative_distance, augmented_path[:, 1])
-        next_pos = np.array([next_x, next_y])
+        new_pos = path[1]
+        print('path', path)
 
-    next_pos = 0.01 * path[1] + 0.99 * next_pos
+    next_pos = 0.01 * new_pos + 0.99 * next_pos
     set_point = [next_pos[0], next_pos[1], 0]
     if Navigation.fsm_state == "start":
         next_yaw = np.sin(t / 300) * np.pi / 4
-        set_point = [set_point[0], set_point[1], 0]
+        set_point = [set_point[0], set_point[1], next_yaw]
         h = height_desired
+    if Navigation.fsm_state == "search_pad":
+        next_yaw = np.sin(t / 300) * np.pi / 4
+        set_pos = np.mean(path, axis=0)
+        set_point = [set_pos[0], set_pos[1], next_yaw]
+        h = height_desired
+
     if Navigation.fsm_state == "turning":
         set_point = [pos_real[0], pos_real[1], np.pi]
         h = height_desired
     if Navigation.fsm_state == "going_back":
-        set_point = [set_point[0], set_point[1], np.pi]
+        next_yaw = clip_angle((np.sin(t / 300) * np.pi / 4) + np.pi)
+        set_point = [set_point[0], set_point[1], next_yaw]
         h = height_desired
     if Navigation.fsm_state == "above_start":
         set_point = [startpos[0], startpos[1], sensor_data['yaw']]
@@ -128,6 +146,8 @@ def get_command(sensor_data, camera_data, dt):
     # set_point = [4, 4, np.pi/2]
     control_command = go_to_point(set_point, h, sensor_data, dt)
     # control_command = go_to_point([startpos[0], startpos[1], 0], height_desired, sensor_data, dt)
+
+    print("z_global: ", sensor_data['z_global'], 'range_down: ', sensor_data['range_down'], 'diff: ', sensor_data['z_global'] - sensor_data['range_down'])
     return control_command  # [vx, vy, alt, yaw_rate]
 
 
@@ -148,7 +168,7 @@ def go_to_point(set_point, set_z, sensor_data, dt):
     point_error = np.array([pos_error[0], pos_error[1], yaw_error])
 
     # P controller
-    kp = np.array([1.0, 1.0, 0.4])
+    kp = np.array([1.2, 1.2, 0.4])
     # if Navigation.fsm_state == "going_back" or Navigation.fsm_state == "above_start" or Navigation.fsm_state == "land":
     #     kp = np.array([-1.0, -1.0, 0.4])
     control_command = kp * point_error
@@ -158,7 +178,7 @@ def go_to_point(set_point, set_z, sensor_data, dt):
     print("Navigation fsm state: ", Navigation.fsm_state)
     print("Set point: ", np.array(set_point).round(2))
     print("Drone pos: ", np.array([drone_pos[0], drone_pos[1], drone_yaw]).round(2))
-    print("Error: ", np.array([point_error[0], point_error[1], yaw_error]).round(2))
+    print("Error: ", np.array(point_error).round(2), np.linalg.norm(pos_error))
     return control_command
 
 
