@@ -579,6 +579,8 @@ if __name__ == '__main__':
             
             drone.step_physics()
 
+            # print('Result pads:', drone.reached_landing_zone, drone.reached_landing_pad, drone.reached_goal_first, drone.reached_goal_second, drone.reached_takeoff_zone, drone.returned_to_takeoff_pad)
+
         # ---- end --- #
 
 
