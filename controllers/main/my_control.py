@@ -50,13 +50,54 @@ nav_range = 0.3
 
 # This is the main function where you will implement your control algorithm
 
+def find_pink_box(image):
+    # Define pink range
+    lower_pink = (150, 100, 100)
+    upper_pink = (155, 255, 255)
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, lower_pink, upper_pink)
+    contours, _ = cv2.findContours(mask, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+    if len(contours) == 0:
+        return image, None
+    contour = contours[0]
+    x, y, w, h = cv2.boundingRect(contour)
+    image = cv2.rectangle(image, (x, y), (x+w, y+h), (255, 0, 0), 2)
+    center = (x + w//2, y + h//2)
+    image = cv2.circle(image, center, 5, (0, 0, 255), -1)
+    corners = [(x, y), (x+w, y), (x, y+h), (x+w, y+h)]
+    for corner in corners:
+        image = cv2.circle(image, corner, 5, (0, 255, 0), -1)
+    return image, (x, y, w, h)
+
+
+def get_object_position(bbox, distance_z):
+    image_center = (300//2, 300//2)
+    bbox_center = (bbox[0] + bbox[2]//2, bbox[1] + bbox[3]//2)
+    x = bbox_center[0] - image_center[0]
+    y = bbox_center[1] - image_center[1]
+    x = x / image_center[0]
+    y = y / image_center[1]
+    fov = 1.5 # rad
+    angle_x = x * fov
+    angle_y = y * fov
+    distance_x = distance_z / (2 * angle_x)
+    distance_y = distance_z / (2 * angle_y)
+    return distance_x, distance_y
+
 def get_command(sensor_data, camera_data, dt):
     global on_ground, startpos, timer, next_pos, h
 
+    camera_data, bbox = find_pink_box(camera_data)
+    if bbox is not None:
+        distance_x, distance_y = get_object_position(bbox, sensor_data['range_front'])
+        print("Distance x, y", distance_x, distance_y)
+
     # Open a window to display the camera image
     # NOTE: Displaying the camera image will slow down the simulation, this is just for testing
-    # cv2.imshow('Camera Feed', camera_data)
-    # cv2.waitKey(1)
+    cv2.imshow('Camera Feed', camera_data)
+    cv2.waitKey(1)
+
+
 
     # Take off
     if startpos is None:
@@ -379,7 +420,7 @@ class Navigation:
 
         if cls.fsm_state == "search_pad":
             cls.goals = [[int(3.7 / cls.res_pos) + i, j] for i in range(int(1.5 / cls.res_pos)) for j in
-                         range(1, int(3 / cls.res_pos) - 1)]
+                         range(1, int(3 / cls.res_pos))]
             cls.goals = np.array(cls.goals)
 
         if cls.fsm_state == "going_back" or cls.fsm_state == "above_start":
