@@ -128,11 +128,11 @@ def get_command(sensor_data, camera_data, dt):
     set_point = [next_pos[0], next_pos[1], 0]
     # print("Path", list(path[:3]))
     if Navigation.fsm_state == "start" or Navigation.fsm_state == None:
-        next_yaw = np.sin(t / 300) * np.pi / 4
+        next_yaw = np.sin(t / 250) * np.pi / 4
         set_point = [set_point[0], set_point[1], next_yaw]
         h = height_desired
     elif Navigation.fsm_state == "search_pad":
-        next_yaw = np.sin(t / 300) * np.pi / 4
+        next_yaw = np.sin(t / 250) * np.pi / 4
         set_point = [set_point[0], set_point[1], next_yaw]
         h = height_desired
         # print("search_pad", sensor_data['z_global'], sensor_data['range_down'])
@@ -378,8 +378,8 @@ class Navigation:
             cls.goals = np.array(cls.goals)
 
         if cls.fsm_state == "search_pad":
-            cls.goals = [[int(3.5 / cls.res_pos) + i, j] for i in range(int(1.5 / cls.res_pos)) for j in
-                         range(0, int(3 / cls.res_pos))]
+            cls.goals = [[int(3.7 / cls.res_pos) + i, j] for i in range(int(1.5 / cls.res_pos)) for j in
+                         range(1, int(3 / cls.res_pos) - 1)]
             cls.goals = np.array(cls.goals)
 
         if cls.fsm_state == "going_back" or cls.fsm_state == "above_start":
@@ -393,6 +393,8 @@ class Navigation:
         if cls.fsm_state == "pad_found" or cls.fsm_state == "landed":
             cls.goals = [[cls.pad_pos[0], cls.pad_pos[1]]]
             cls.goals = np.array(cls.goals)
+
+        print("FSM State", cls.fsm_state)
 
     @classmethod
     def get_potential(cls, occupancy_map: np.ndarray) -> np.ndarray:
@@ -471,11 +473,14 @@ class Navigation:
             if cls.ground_occupancy_map(ground_data, start_pos):
                 cls.goals = [g for g in cls.goals if g[0] != start_pos[0] or g[1] != start_pos[1]]
 
-                obstacles = np.where(occupancy_map == -1)
+                obstacles = np.where(occupancy_map < 0)
                 for i in range(len(obstacles[0])):
                     cls.goals = [g for g in cls.goals if g[0] != obstacles[0][i] or g[1] != obstacles[1][i]]
-
-            print("Goals", len(cls.goals))
+                if len(cls.goals) == 0:
+                    # Reset the grid search
+                    cls.update_fsm_data()
+                    cls.ground_map = np.zeros_like(cls.ground_map) + 0.5
+                print("Goals", len(cls.goals))
         cls.potential_field = cls.get_potential(occupancy_map)
         return cls.get_path(start_pos)
 
