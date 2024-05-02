@@ -1,4 +1,5 @@
 # Examples of basic methods for simulation competition
+from collections import deque
 import numpy as np
 import matplotlib.pyplot as plt
 import time
@@ -78,25 +79,36 @@ def get_object_position(bbox, distance_z):
     x = x / image_center[0]
     y = y / image_center[1]
     fov = 1.5 # rad
-    angle_x = x * fov
-    angle_y = y * fov
-    distance_x = distance_z / (2 * angle_x)
-    distance_y = distance_z / (2 * angle_y)
+    angle_x = x * (fov / 2)
+    angle_y = y * (fov / 2)
+    distance_x = -distance_z * np.tan(angle_x)
+    distance_y = -distance_z * np.tan(angle_y)
     return distance_x, distance_y
 
 def get_command(sensor_data, camera_data, dt):
     global on_ground, startpos, timer, next_pos, h
 
-    camera_data, bbox = find_pink_box(camera_data)
+    if Navigation.fsm_state == "start" or Navigation.fsm_state == None or Navigation.fsm_state == "init_scan" or Navigation.fsm_state == "go_pink":
+        camera_data, bbox = find_pink_box(camera_data)
+    else:
+        bbox = None
     if bbox is not None:
-        distance_x, distance_y = get_object_position(bbox, sensor_data['range_front'])
-        print("Distance x, y", distance_x, distance_y)
+        distance_x = (2.5 - sensor_data['x_global']) / np.cos(sensor_data['yaw'])
+        distance_y, distance_z = get_object_position(bbox, distance_x)
+        distance_y = distance_y * np.cos(sensor_data['yaw']) + distance_x * np.sin(sensor_data['yaw'])
+
+        pos_x = 2.5
+        pos_y = sensor_data['y_global'] + distance_y
+        pos_z = sensor_data['z_global'] + distance_z
+
+        Navigation.pink_pos.append(np.array([pos_x, pos_y, pos_z]))
+        print('Pink', pos_x, pos_y, pos_z)
+        pink_view = True
+    else:
+        pink_view = False
 
     # Open a window to display the camera image
     # NOTE: Displaying the camera image will slow down the simulation, this is just for testing
-    cv2.imshow('Camera Feed', camera_data)
-    cv2.waitKey(1)
-
 
 
     # Take off
@@ -116,13 +128,14 @@ def get_command(sensor_data, camera_data, dt):
 
     pos_real = [sensor_data['x_global'], sensor_data['y_global']]
     Navigation.current_pos = np.array(pos_real)
+    Navigation.yaw = sensor_data['yaw']
     landing_zone = 3.5 < pos_real[0] < 5.0 and 0.0 < pos_real[1] < 3.0
     turned = abs(clip_angle(sensor_data['yaw'] - np.pi)) < 0.3
 
     # Get the goal position and drone position
     pos = (int(sensor_data['x_global'] / res_pos + 0.5), int(sensor_data['y_global'] / res_pos + 0.5))
     ground_data = sensor_data['z_global'] - sensor_data['range_down']
-    Navigation.update_fsm_state(landing_zone, turned, sensor_data['range_down'])
+    Navigation.update_fsm_state(landing_zone, turned, sensor_data['range_down'], pink_view)
 
     # Only keep negative values of the map
     negative_map = map
@@ -171,7 +184,14 @@ def get_command(sensor_data, camera_data, dt):
     if Navigation.fsm_state == "start" or Navigation.fsm_state == None:
         next_yaw = np.sin(t / 250) * np.pi / 4
         set_point = [set_point[0], set_point[1], next_yaw]
-        h = height_desired
+        h = height_desired * 0.001 + h * 0.999
+    elif Navigation.fsm_state == "init_scan":
+        next_yaw = np.sin(t / 250) * np.pi / 2
+        set_point = [pos_real[0], pos_real[1], next_yaw]
+        h = h
+    elif Navigation.fsm_state == "go_pink":
+        set_point = [set_point[0], set_point[1], np.arctan2(Navigation.pink_po[1] - sensor_data['y_global'], max(Navigation.pink_po[0] - sensor_data['x_global'], 0.1))]
+        h = Navigation.pink_po[2] * 0.001 + h * 0.999
     elif Navigation.fsm_state == "search_pad":
         next_yaw = np.sin(t / 250) * np.pi / 4
         set_point = [set_point[0], set_point[1], next_yaw]
@@ -184,14 +204,18 @@ def get_command(sensor_data, camera_data, dt):
     elif Navigation.fsm_state == "landed":
         set_point = [Navigation.pad_pos[0], Navigation.pad_pos[1], 0]
         h = height_desired      
-
     elif Navigation.fsm_state == "turning":
         set_point = [pos_real[0], pos_real[1], np.pi]
         h = height_desired
+
+    elif Navigation.fsm_state == "going_back_pink":
+        set_point = [set_point[0], set_point[1], np.arctan2(Navigation.pink_po[1] - sensor_data['y_global'], min(Navigation.pink_po[0] - sensor_data['x_global'], -0.1))]
+        h = Navigation.pink_po[2] * 0.001 + h * 0.999
+
     elif Navigation.fsm_state == "going_back":
         next_yaw = clip_angle((np.sin(t / 300) * np.pi / 4) + np.pi)
         set_point = [set_point[0], set_point[1], next_yaw]
-        h = height_desired
+        h = height_desired * 0.001 + h * 0.999
     elif Navigation.fsm_state == "above_start":
         set_point = [startpos[0], startpos[1], sensor_data['yaw']]
         h = height_desired
@@ -200,6 +224,9 @@ def get_command(sensor_data, camera_data, dt):
         h *= 0.995
     else:
         raise ValueError("Unknown state")
+    
+    # print("Navigation fsm state: ", Navigation.fsm_state)
+    # print("Set point: ", np.array(set_point).round(2), h)
     
 
     # set_point = [4, 4, np.pi/2]
@@ -362,52 +389,86 @@ def clip_angle(angle):
 class Navigation:
     startpos = None
     current_pos = None
+    yaw = None
     fsm_states = ['start', 'going_back']
     fsm_state: str = None
     potential_field: np.ndarray = None
     goals: np.array = None
     res_pos = 0.2
 
+    pink_pos = deque(maxlen=50)
+    pink_po = None
+    pink_found = False
     landed_coutdown = 1000
+    scan_coutdown = 1000
 
     ground_map: np.ndarray = np.zeros((int(5 / res_pos), int(3 / res_pos))) + 0.5  # 1 for pad, 0 for ground
 
     @classmethod
-    def update_fsm_state(cls, landing_zone: bool, turned: bool, range_down: float):
+    def update_fsm_state(cls, landing_zone: bool, turned: bool, range_down: float, pink: bool):
         if cls.fsm_state is None:
+            cls.fsm_state = "init_scan"
+            cls.update_fsm_data()
+
+        elif cls.fsm_state == "init_scan" and cls.scan_coutdown < 0:
             cls.fsm_state = "start"
             cls.update_fsm_data()
 
-        if landing_zone and cls.fsm_state == "start":
+        elif pink and cls.fsm_state == "start" and not cls.pink_found:
+            cls.fsm_state = "go_pink"
+            cls.update_fsm_data()
+
+        elif cls.fsm_state == "go_pink" and not pink:
+            cls.fsm_state = "start"
+            cls.scan_coutdown = 1000
+            if np.linalg.norm(cls.current_pos - cls.pink_po[:2]) < 0.5:
+                cls.pink_found = True
+                # cls.pink_po[0] = cls.current_pos[0]
+                # cls.pink_po[1] = cls.current_pos[1]
+            cls.update_fsm_data()
+
+        elif cls.fsm_state == 'go_pink':
+            cls.update_fsm_data()
+
+        elif landing_zone and cls.fsm_state == "start":
             cls.fsm_state = "search_pad"
             cls.update_fsm_data()
         
-        if cls.fsm_state == "search_pad":
+        elif cls.fsm_state == "search_pad":
             pad = np.where(cls.ground_map > 0.6)
             if len(pad[0]) > 0:
                 cls.pad_pos = (pad[0][0], pad[1][0])
                 cls.fsm_state = "pad_found"
 
-        if cls.fsm_state == "pad_found" and cls.landed_coutdown < 0:
+        elif cls.fsm_state == "pad_found" and cls.landed_coutdown < 0:
             cls.fsm_state = "landed"
             cls.update_fsm_data()
 
-        if cls.fsm_state == "landed" and range_down > 0.48:
+        elif cls.fsm_state == "landed" and range_down > 0.48:
             cls.fsm_state = "turning"
             cls.update_fsm_data()
 
+        elif cls.fsm_state == "turning" and cls.pink_found:
+            cls.fsm_state = "going_back_pink"
+            cls.update_fsm_data()
 
-        if turned and cls.fsm_state == "turning":
+        elif turned and cls.fsm_state == "turning" and not cls.pink_found:
             cls.fsm_state = "going_back"
             cls.update_fsm_data()
 
-        if cls.fsm_state == "going_back" and np.linalg.norm(cls.current_pos - cls.startpos) < 0.2:
+        elif cls.fsm_state == "going_back_pink" and np.linalg.norm(cls.current_pos - cls.pink_po[:2]) < 0.3:
+            cls.fsm_state = "going_back"
+            cls.update_fsm_data()
+
+        elif cls.fsm_state == "going_back" and np.linalg.norm(cls.current_pos - cls.startpos) < 0.2:
             cls.fsm_state = "above_start"
             cls.update_fsm_data()
 
-        if cls.fsm_state == "above_start" and np.linalg.norm(cls.current_pos - cls.startpos) < 0.05:
+        elif cls.fsm_state == "above_start" and np.linalg.norm(cls.current_pos - cls.startpos) < 0.1:
             cls.fsm_state = "land"
             cls.update_fsm_data()
+        else:
+            pass
 
         # print('Objective', cls.current_pos, cls.startpos, np.linalg.norm(cls.current_pos - cls.startpos))
 
@@ -418,22 +479,35 @@ class Navigation:
                          range(int(1 / cls.res_pos), int(2 / cls.res_pos))]
             cls.goals = np.array(cls.goals)
 
+        if cls.fsm_state == "go_pink":
+            cls.pink_po = np.mean(cls.pink_pos, axis=0) 
+            cls.pink_po[2] = max(min(cls.pink_po[2], 2.7), 0.3)
+            delta = np.array([0.2 * np.cos(cls.yaw), 0.6 * np.sin(cls.yaw)])
+            cls.goals = [[(cls.pink_po[0] + delta[0]) / cls.res_pos, (cls.pink_po[1] + delta[1]) / cls.res_pos]]
+            cls.goals = np.array(cls.goals)
+
         if cls.fsm_state == "search_pad":
             cls.goals = [[int(3.7 / cls.res_pos) + i, j] for i in range(int(1.5 / cls.res_pos)) for j in
                          range(1, int(3 / cls.res_pos))]
+            cls.goals = np.array(cls.goals)
+
+        if cls.fsm_state == "going_back_pink":
+            delta = np.array([0.2 * np.cos(cls.yaw), 0.6 * np.sin(cls.yaw)])
+            cls.goals = [[(cls.pink_po[0] + delta[0]) / cls.res_pos, (cls.pink_po[1] + delta[1]) / cls.res_pos]]
             cls.goals = np.array(cls.goals)
 
         if cls.fsm_state == "going_back" or cls.fsm_state == "above_start":
             cls.goals = [[cls.startpos[0] / cls.res_pos, cls.startpos[1] / cls.res_pos]]
             cls.goals = np.array(cls.goals)
 
-        if cls.fsm_state == "turning":
+        if cls.fsm_state == "turning" or cls.fsm_state == 'init_scan':
             cls.goals = [[cls.current_pos[0] / cls.res_pos, cls.current_pos[1] / cls.res_pos]]
             cls.goals = np.array(cls.goals)
 
         if cls.fsm_state == "pad_found" or cls.fsm_state == "landed":
             cls.goals = [[cls.pad_pos[0], cls.pad_pos[1]]]
             cls.goals = np.array(cls.goals)
+
 
         print("FSM State", cls.fsm_state)
 
@@ -454,7 +528,7 @@ class Navigation:
         for i in range(occupancy_map.shape[0]):
             for j in range(occupancy_map.shape[1]):
                 distances = np.min(np.linalg.norm(cls.goals - np.array([i, j]), axis=1)) / len(occupancy_map)
-                inv_distances = 15 / (0.8 + distances)
+                inv_distances = 15 / (0.8 + distances) if occupancy_map[i, j] >= 0 else 0
                 potential[i, j] = inv_distances + occupancy_map[i, j]
         return potential
 
@@ -509,6 +583,9 @@ class Navigation:
         """
         if cls.fsm_state == "pad_found":
             cls.landed_coutdown -= 1
+
+        if cls.fsm_state == 'init_scan':
+            cls.scan_coutdown -= 1
 
         if cls.fsm_state == "search_pad":
             if cls.ground_occupancy_map(ground_data, start_pos):
